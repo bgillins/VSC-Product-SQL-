@@ -1,0 +1,96 @@
+ WITH CTE1 AS(
+            SELECT 
+                -- REMOVE EVERYTHING AFTER THE '-' TO RETURN JUST STORE NAME. 
+                LEFT(a.cora_acct_code, CHARINDEX('-',a.cora_acct_code)-1) AS Store,
+                -- COUNT VSC UNITS. VSC UNITS ALL COST MORE THAN 750 DOLLARS. PREVENTS MISC ITEMS FROM BEING COUNTED IF STORED IN SAME COLUMN. 
+                CAST(SUM(COALESCE((CASE WHEN mbicost > 750 THEN 1 END),0 )) AS FLOAT) AS VSC,
+                -- COUNT ONLY RETAIL UNITS THATS ARE ELIGABLE TO PURCHASE VSC
+                CAST (SUM(CASE WHEN saletype = 'Cash' OR saletype = 'Finance' THEN 1 END) AS FLOAT) AS Retail,
+                -- COUNT ONLY LEASE UNITS THATS
+                CAST ( COALESCE( SUM (CASE WHEN leasetype = 'L' THEN 1 END),0) AS FLOAT) AS Lease,
+                -- COUNT PRODUCT THAT IS EITHER CONTAINS LEASECARE OR TOTAL CARE. MANY STORES CAN ONLY SALE ONE OR THE OTHER. MUST BE IN LEASETYPE 'L'
+                MAX(COALESCE((CASE WHEN frontbackflag = 'B' AND weowecode = 'LEASE' AND saleamount >= 499.99 AND leasetype = 'L' THEN 1 END),0 )) AS HAS_LEASECARE,
+                MAX(COALESCE((CASE WHEN frontbackflag = 'B' AND weowecode = 'COMBO' AND saleamount >= 499.99 AND weowedesc LIKE '%TOTAL%' AND leasetype = 'L' THEN 1 END),0 )) AS HAS_TOTALCARE,
+                -- GROUP TOTAL COUNT IN MONTH FORMAT. 
+                FORMAT( contractdate, 'MM-yyyy') AS salesdate
+            FROM vehiclesales_v as a
+            -- TABLE SHOWS ALL ACCESSORIES AVAILABLE TO SALE. 
+            LEFT JOIN weowe_v
+                ON a.dealno = weowe_v.dealno AND a.cora_acct_code = weowe_v.cora_acct_code
+            WHERE
+            -- HOW WE DETERMINE IF A UNIT HAS BEEN SOLD. EITHER HAS TO BE FINALIZED OR BOOKED. ANOTHER WAY IS TO SEE IF CUSTOMER HAS TAKEN DELIVERY BUT NOT CANCELED CONTRACT.  
+                (fiwipstatuscode IN ('F', 'B') OR (fiwipstatuscode != 'C' AND dealevent4 = 'D'))
+                -- Go back 12 months
+                AND FORMAT(contractdate, 'yyyy') >=  FORMAT(DATEADD(MONTH, -12, GETDATE()), 'yyyy')
+                -- CRMSALETYPE GIVES US INFORMATION IF UNIT WAS TRANSFERRED TO OTHER DEALERSHIP NOT SOLD, WHOLESALE, FLEET, AND COMMERICAL DEALS. 
+                AND COALESCE (crmsaletype, 0 ) NOT IN (3, 4, 7, 5)
+                -- STORE WAS AQUIRED IN JULY. ADDED IN UNION. 
+                AND a.cora_acct_code != 'PAVAK-FI'
+            GROUP BY a.cora_acct_code, FORMAT(contractdate, 'MM-yyyy')
+            
+            -- ADD IN PAVAK 
+            UNION 
+
+            SELECT 
+                LEFT(a.cora_acct_code, CHARINDEX('-',a.cora_acct_code)-1) AS Store,
+                CAST(SUM(COALESCE((CASE WHEN mbicost > 750 THEN 1 END),0 )) AS FLOAT) AS VSC,
+                CAST (SUM(CASE WHEN saletype = 'Cash' OR saletype = 'Finance' THEN 1 END) AS FLOAT) AS Retail,
+                CAST ( COALESCE(SUM (CASE WHEN leasetype = 'L' THEN 1 END), 0) AS FLOAT) AS Lease,
+                MAX(COALESCE((CASE WHEN frontbackflag = 'B' AND weowecode = 'LEASE' AND saleamount >= 499.99 AND CAST(leasetype AS VARCHAR) = 'L' THEN 1 END),0 )) AS HAS_LEASECARE,
+                MAX(COALESCE((CASE WHEN frontbackflag = 'B' AND weowecode = 'COMBO' AND saleamount >= 499.99 AND weowedesc LIKE '%TOTAL%' AND leasetype = 'L' THEN 1 END),0 )) AS HAS_TOTALCARE,
+                FORMAT( contractdate, 'MM-yyyy') AS salesdate
+            FROM vehiclesales_v as a
+            LEFT JOIN weowe_v
+                ON a.dealno = weowe_v.dealno AND a.cora_acct_code = weowe_v.cora_acct_code
+            WHERE 
+                (fiwipstatuscode IN ('F', 'B') OR (fiwipstatuscode != 'C' AND dealevent4 = 'D'))
+                AND contractdate >= '07-12-2022' -- PAVAK Start Date
+                AND COALESCE (crmsaletype, 0 ) NOT IN (3, 4, 7, 5)
+                AND a.cora_acct_code = 'PAVAK-FI'
+            GROUP BY a.cora_acct_code, FORMAT(contractdate, 'MM-yyyy')
+
+-- ADD IN PRODUCT ONLY SALES THAT ARE PURCHASED NOT ON INITIAL SALES DATE. TABLE IS FORMATED DIFFERENTLY AND REQUIRES ALL DATA TO BE CONVERTED. 
+            UNION 
+            SELECT 
+                LEFT(v.cora_acct_code, CHARINDEX('-',v.cora_acct_code)-1) AS Store,
+                CAST(SUM(COALESCE((CASE WHEN mbicost > 750 THEN 1 END),0 )) AS FLOAT) AS VSC,
+                -- DUMMY COLUMNS TO JOIN UNIONS AND NOT DOUBLE COUNT UNIT DEALS. 
+                NULL AS Retail,
+                NULL AS Lease,
+                MAX(COALESCE((CASE WHEN frontbackflag = 'B' AND weowecode = 'LEASE' AND saleamount >= 499.99 AND CAST(leasetype AS VARCHAR) = 'L' THEN 1 END),0 )) AS HAS_LEASECARE,
+                MAX(COALESCE((CASE WHEN frontbackflag = 'B' AND weowecode = 'COMBO' AND saleamount >= 499.99 AND weowedesc LIKE '%TOTAL%' AND CAST(leasetype AS VARCHAR) = 'L' THEN 1 END),0 )) AS HAS_TOTALCARE,
+                FORMAT( contractdate, 'MM-yyyy') AS salesdate
+            FROM productonlysales_v AS v
+            LEFT JOIN weowe_v
+                ON CAST(v.dealno AS VARCHAR)= weowe_v.dealno AND v.cora_acct_code = weowe_v.cora_acct_code
+            WHERE 
+                (CAST(fiwipstatuscode AS VARCHAR) != 'C')
+                AND CAST(COALESCE (crmsaletype, '0' ) AS VARCHAR) NOT IN ('3', '4', '7', '5')
+                -- Go back 12 months
+                AND FORMAT(contractdate, 'yyyy') >=  FORMAT(DATEADD(MONTH, -12, GETDATE()), 'yyyy')
+            GROUP BY v.cora_acct_code, FORMAT(contractdate, 'MM-yyyy')
+            )
+
+-- SUBQUERY USED TO BUILD OUT PENETRATION DEALS SINCE LEASECARE AND TOTALCARE NEED TO BE GROUPED TOGETHER AND THE UNION STATEMENTS. 
+SELECT *, 
+(CASE WHEN Retail > 0 THEN ROUND(VSC/Retail, 2) 
+    ELSE 0 END) AS VSC_Penetration,
+(CASE WHEN Lease > 0 THEN ROUND(LeaseCare/Lease, 2) 
+    ELSE 0 END) AS LeaseCare_Penetration
+FROM(
+SELECT
+Store,
+salesdate,
+SUM( COALESCE(VSC, 0) ) VSC, 
+SUM(retail) retail,
+SUM(Lease) Lease,
+SUM(HAS_LEASECARE + HAS_TOTALCARE) LeaseCare
+FROM CTE1
+GROUP BY Store, salesdate
+) Sub1
+
+-- CONDITION REMOVES STORES NO LONGER OWNED LIKE EPIC AND ALT. 
+WHERE retail IS NOT NULL
+
+
+-- CODE CREATED BY BRANDON GILLINS. 
